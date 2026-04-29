@@ -17,15 +17,33 @@ A GitHub Action that celebrates merged pull requests by posting celebratory mess
 
 ## Setup Instructions
 
-### 1. Create a Slack Webhook
+### 1. Choose Your Slack Delivery Method
 
-This action supports **both** Slack webhook types:
-- **Incoming Webhooks** (Recommended) - Rich formatted messages with Block Kit
-- **Workflow Webhooks** - Simple text messages
+This action supports three ways to post to Slack. Pick one:
 
-The action automatically detects which type you're using based on the webhook URL.
+| Option | What it sends | Threaded? | Auth |
+|---|---|---|---|
+| **A: Bot Token** (Recommended) | Rich Block Kit, summary as parent, one threaded reply per repo | ✅ | `xoxb-` token + channel ID |
+| **B: Incoming Webhook** | Single rich Block Kit message | ❌ | Webhook URL |
+| **C: Workflow Webhook** | Single plain-text message | ❌ | Webhook URL |
 
-#### Option A: Incoming Webhook (Recommended - Rich Formatting)
+If both a bot token and a webhook URL are provided, the bot token wins (threaded mode). The action auto-detects which webhook type you're using based on the URL.
+
+#### Option A: Bot Token (Recommended — Threaded Messages)
+
+Posts a clean summary message to the channel, then posts one threaded reply per repository so the channel stays uncluttered when many PRs land at once.
+
+1. Go to https://api.slack.com/apps
+2. Click "Create New App" → "From scratch"
+3. Name your app (e.g., "PR Celebration Bot") and select your workspace
+4. Click "OAuth & Permissions" from the left sidebar
+5. Under **Bot Token Scopes**, add `chat:write` (and optionally `chat:write.public` if you want to post to channels the bot hasn't been invited to)
+6. Click "Install to Workspace" at the top of the OAuth & Permissions page
+7. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+8. In Slack, invite the bot to the channel: `/invite @YourBotName`
+9. Get the channel ID: in Slack, right-click the channel → "View channel details" → copy the ID at the bottom (looks like `C0123ABC456`). You can also pass `#channel-name`.
+
+#### Option B: Incoming Webhook (Rich Formatting, No Threading)
 
 Creates beautifully formatted messages with headers, dividers, clickable links, and rich formatting.
 
@@ -38,7 +56,7 @@ Creates beautifully formatted messages with headers, dividers, clickable links, 
 7. Select the channel where you want celebrations posted
 8. Copy the webhook URL (starts with `https://hooks.slack.com/services/...`)
 
-#### Option B: Workflow Webhook (Simple Text)
+#### Option C: Workflow Webhook (Simple Text)
 
 Uses plain text formatting with emojis and unicode characters. Good for existing workflow integrations.
 
@@ -50,19 +68,20 @@ Uses plain text formatting with emojis and unicode characters. Good for existing
 
 ### 2. Configure GitHub Repository Secrets
 
-1. Go to your repository's Settings → Secrets and variables → Actions
-2. Click "New repository secret" and add:
+Go to your repository's Settings → Secrets and variables → Actions, then add the secrets that match your chosen option from step 1.
 
-   - **Name**: `SLACK_WEBHOOK_URL`
-   - **Value**: Your Slack webhook URL from step 1
+**For Option A (Bot Token — Threaded):**
+- `SLACK_BOT_TOKEN` — your `xoxb-...` Bot User OAuth Token
+- `SLACK_CHANNEL` — channel ID (e.g. `C0123ABC456`) or `#channel-name`
 
-3. Add another secret:
-   - **Name**: `REPOS_TO_CHECK`
-   - **Value**: Comma-separated list of repos to monitor (e.g., `owner/repo1,owner/repo2`)
+**For Option B or C (Webhook):**
+- `SLACK_WEBHOOK_URL` — your Slack webhook URL
 
-4. (Optional) Configure the merge window:
-   - **Name**: `MERGE_WINDOW`
-   - **Value**: Number of hours to look back for merged PRs (default: 24)
+**Always required:**
+- `REPOS_TO_CHECK` — comma-separated list of repos to monitor (e.g., `owner/repo1,owner/repo2`)
+
+**Optional:**
+- `MERGE_WINDOW` — number of hours to look back for merged PRs (default: 24)
 
 The `GITHUB_TOKEN` is automatically provided by GitHub Actions, but if you need to check private repos or repos outside your organization, create a Personal Access Token with `repo` scope and add it as a secret.
 
@@ -101,6 +120,12 @@ jobs:
         uses: ./
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Option A (Bot Token, threaded — recommended):
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack-channel: ${{ secrets.SLACK_CHANNEL }}
+          # Option B/C (Webhook — fallback). Either supply this OR the bot
+          # token + channel above. If both are set, the bot token takes
+          # precedence (threaded messages).
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           repos-to-check: ${{ secrets.REPOS_TO_CHECK }}
           merge-window: ${{ inputs.merge-window || '24' }}
@@ -153,10 +178,17 @@ You can manually trigger the workflow to test it:
    cp .env.example .env
    ```
 
-2. Fill in your actual values in `.env`:
+2. Fill in your actual values in `.env`. Use either bot-token mode (threaded) or webhook mode:
    ```
    GITHUB_TOKEN=ghp_your_token_here
+
+   # Option A — bot token (threaded). Preferred when both modes are set.
+   SLACK_BOT_TOKEN=xoxb-your-bot-token
+   SLACK_CHANNEL=C0123ABC456
+
+   # Option B/C — webhook (single message, no threading)
    SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+
    REPOS_TO_CHECK=owner/repo1,owner/repo2
    MERGE_WINDOW=24
    ```
@@ -168,9 +200,37 @@ You can manually trigger the workflow to test it:
 
 ## Example Slack Messages
 
-The bot automatically formats messages based on your webhook type:
+The bot automatically formats messages based on the delivery method you configured:
 
-### Incoming Webhook (Rich Format)
+### Bot Token (Threaded — Option A)
+
+The summary is the parent message; details land in the thread, one reply per repository:
+
+```
+[parent message]
+🎉 Time to Celebrate! 🎉
+
+3 awesome PRs merged in the last 24 hours by 2 contributors!
+
+🧵 PR details in thread below
+   │
+   ├── [thread reply 1]
+   │   📦 octocat/Hello-World
+   │   • 🔀 #123: Add amazing new feature
+   │     👤 @alice
+   │   • 🔀 #124: Fix critical bug
+   │     👤 @bob
+   │
+   ├── [thread reply 2]
+   │   📦 acme/widgets
+   │   • 🔀 #45: Bump dependency versions
+   │     👤 @alice
+   │
+   └── [thread reply 3]
+       🙌 Amazing work everyone! Keep shipping! 🙌
+```
+
+### Incoming Webhook (Rich Format — Option B)
 
 Includes clickable PR links, rich formatting, and Block Kit elements:
 
@@ -195,7 +255,7 @@ Includes clickable PR links, rich formatting, and Block Kit elements:
 🙌 Amazing work everyone! Keep shipping! 🙌
 ```
 
-### Workflow Webhook (Text Format)
+### Workflow Webhook (Text Format — Option C)
 
 Simple text with emojis and unicode formatting:
 
@@ -227,7 +287,9 @@ Simple text with emojis and unicode formatting:
 2. The TypeScript script fetches all PRs from specified repositories
 3. Filters for PRs merged in the configured time window (default: 24 hours)
 4. Formats a fun celebration message
-5. Posts to Slack via webhook
+5. Posts to Slack:
+   - **Bot Token mode**: posts a parent summary via `chat.postMessage`, then one threaded reply per repository, then a footer reply — all using the parent's `thread_ts`.
+   - **Webhook mode**: posts a single message (rich or text, depending on webhook type).
 
 ## Customization
 
@@ -266,6 +328,13 @@ Set the `MERGE_WINDOW` environment variable or use the `merge-window` action inp
   - **Incoming Webhooks**: `https://hooks.slack.com/services/...` (rich formatting with Block Kit)
   - **Workflow Webhooks**: `https://hooks.slack.com/workflows/...` or `https://hooks.slack.com/triggers/...` (simple text)
 - For workflow webhooks, ensure your workflow is configured to accept a `message` variable (string type)
+
+**Bot token / threaded message errors**
+- `channel_not_found` — the bot is not a member of the channel. In Slack, run `/invite @YourBotName` in the target channel, or set `chat:write.public` scope.
+- `not_in_channel` — same fix as above.
+- `invalid_auth` / `not_authed` — the `SLACK_BOT_TOKEN` is wrong, revoked, or not actually a bot token. Bot tokens start with `xoxb-`.
+- `missing_scope` — re-install the app with the `chat:write` scope under OAuth & Permissions, then update the secret with the new token.
+- The bot must be re-invited to a channel after being kicked, or after the channel is recreated with the same name.
 
 ## Releasing to GitHub Marketplace
 

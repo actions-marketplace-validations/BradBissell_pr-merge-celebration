@@ -63,3 +63,26 @@ export enum WebhookType {
   INCOMING = 'incoming',
   WORKFLOW = 'workflow',
 }
+
+// Delivery mode — controls whether we send a single message via webhook
+// or post a parent + threaded replies via the Slack Web API
+export enum DeliveryMode {
+  WEBHOOK = 'webhook',
+  BOT_API = 'bot_api',
+}
+
+// Slack chat.postMessage request body
+export interface SlackChatPostMessageRequest {
+  channel: string;
+  text?: string;
+  blocks?: SlackBlock[];
+  thread_ts?: string;
+}
+
+// Slack chat.postMessage response
+export interface SlackChatPostMessageResponse {
+  ok: boolean;
+  ts?: string;
+  channel?: string;
+  error?: string;
+}

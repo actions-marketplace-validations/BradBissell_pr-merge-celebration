@@ -36321,15 +36321,28 @@ function getConfig() {
     // Read GitHub Actions inputs if available, otherwise fall back to env vars
     const githubToken = core.getInput("github-token") || process.env.GITHUB_TOKEN;
     const slackWebhookUrl = core.getInput("slack-webhook-url") || process.env.SLACK_WEBHOOK_URL;
+    const slackBotToken = core.getInput("slack-bot-token") || process.env.SLACK_BOT_TOKEN;
+    const slackChannel = core.getInput("slack-channel") || process.env.SLACK_CHANNEL;
     const reposToCheck = core.getInput("repos-to-check") || process.env.REPOS_TO_CHECK;
     const mergeWindow = core.getInput("merge-window") || process.env.MERGE_WINDOW || "24";
     if (!githubToken) {
         throw new Error("GITHUB_TOKEN environment variable is required");
     }
-    if (!slackWebhookUrl) {
-        throw new Error("SLACK_WEBHOOK_URL environment variable is required");
+    // Either bot token + channel OR webhook URL must be configured.
+    // Bot token mode takes precedence (enables threaded replies).
+    const hasBotConfig = Boolean(slackBotToken && slackChannel);
+    const hasWebhookConfig = Boolean(slackWebhookUrl);
+    if (slackBotToken && !slackChannel) {
+        throw new Error("SLACK_CHANNEL is required when SLACK_BOT_TOKEN is set (channel ID like C0123ABC456 or #channel-name)");
     }
-    if (!slackWebhookUrl.startsWith("https://hooks.slack.com/")) {
+    if (!hasBotConfig && !hasWebhookConfig) {
+        throw new Error("Either SLACK_BOT_TOKEN + SLACK_CHANNEL (for threaded messages) or SLACK_WEBHOOK_URL is required");
+    }
+    if (slackBotToken && !slackBotToken.startsWith("xoxb-")) {
+        throw new Error("SLACK_BOT_TOKEN must be a valid Slack bot token (should start with xoxb-)");
+    }
+    if (hasWebhookConfig &&
+        !slackWebhookUrl.startsWith("https://hooks.slack.com/")) {
         throw new Error("SLACK_WEBHOOK_URL must be a valid Slack webhook URL (should start with https://hooks.slack.com/)");
     }
     if (!reposToCheck) {
@@ -36344,10 +36357,13 @@ function getConfig() {
     const repos = parseRepos(reposToCheck);
     console.log(chalk_1.default.cyan(`Checking ${chalk_1.default.bold(repos.length.toString())} repository(ies):`));
     repos.forEach((repo) => console.log(chalk_1.default.gray(`  - ${repo.owner}/${repo.repo}`)));
+    console.log(chalk_1.default.cyan(`Slack mode: ${chalk_1.default.bold(hasBotConfig ? "bot token (threaded)" : "webhook")}`));
     console.log("");
     return {
         githubToken,
-        slackWebhookUrl,
+        slackWebhookUrl: hasBotConfig ? undefined : slackWebhookUrl,
+        slackBotToken: hasBotConfig ? slackBotToken : undefined,
+        slackChannel: hasBotConfig ? slackChannel : undefined,
         repos,
         mergeWindowHours,
     };
@@ -36472,7 +36488,7 @@ async function main() {
         const config = (0, config_1.getConfig)();
         // Initialize clients
         const githubClient = new github_1.GitHubClient(config.githubToken);
-        const slackNotifier = new slack_1.SlackNotifier(config.slackWebhookUrl, config.mergeWindowHours);
+        const slackNotifier = new slack_1.SlackNotifier(config.slackWebhookUrl, config.mergeWindowHours, { botToken: config.slackBotToken, channel: config.slackChannel });
         // Fetch merged PRs from the configured time window
         console.log(chalk_1.default.blue(`Looking back ${chalk_1.default.bold(config.mergeWindowHours.toString())} hours for merged PRs\n`));
         const mergedPRs = await githubClient.getMergedPRsInTimeWindow(config.repos, config.mergeWindowHours);
@@ -36511,15 +36527,27 @@ exports.SlackNotifier = void 0;
 const chalk_1 = __importDefault(__nccwpck_require__(1702));
 const axios_1 = __importDefault(__nccwpck_require__(7455));
 const types_1 = __nccwpck_require__(7715);
+const SLACK_API_BASE = "https://slack.com/api";
 class SlackNotifier {
-    constructor(webhookUrl, mergeWindowHours = 24) {
+    constructor(webhookUrl, mergeWindowHours = 24, options = {}) {
         this.webhookUrl = webhookUrl;
+        this.botToken = options.botToken;
+        this.channel = options.channel;
         this.mergeWindowHours = mergeWindowHours;
+        if (this.botToken && this.channel) {
+            this.mode = types_1.DeliveryMode.BOT_API;
+        }
+        else if (this.webhookUrl) {
+            this.mode = types_1.DeliveryMode.WEBHOOK;
+        }
+        else {
+            throw new Error("SlackNotifier requires either a webhook URL or a bot token + channel");
+        }
     }
     /**
-     * Detect webhook type from URL pattern
+     * Detect webhook type from URL pattern (only used in WEBHOOK mode).
      * Incoming Webhooks: https://hooks.slack.com/services/...
-     * Workflow Webhooks: https://hooks.slack.com/workflows/... or https://hooks.slack.com/triggers/...
+     * Workflow Webhooks: https://hooks.slack.com/workflows/... or .../triggers/...
      */
     detectWebhookType() {
         if (this.webhookUrl.includes("/workflows/") ||
@@ -36533,6 +36561,13 @@ class SlackNotifier {
             console.log(chalk_1.default.yellow("No merged PRs found - skipping Slack notification"));
             return;
         }
+        if (this.mode === types_1.DeliveryMode.BOT_API) {
+            await this.sendThreadedCelebration(prs);
+            return;
+        }
+        await this.sendWebhookCelebration(prs);
+    }
+    async sendWebhookCelebration(prs) {
         const webhookType = this.detectWebhookType();
         const message = webhookType === types_1.WebhookType.WORKFLOW
             ? this.buildSimpleTextMessage(prs)
@@ -36550,10 +36585,61 @@ class SlackNotifier {
         }
     }
     /**
-     * Get day-specific celebration header
+     * Post a parent celebration message and one threaded reply per repo group,
+     * plus a final threaded footer reply.
      */
+    async sendThreadedCelebration(prs) {
+        const repoGroups = this.groupPRsByRepo(prs);
+        const summaryText = this.buildSummaryFallbackText(prs);
+        try {
+            const parentTs = await this.postMessage({
+                channel: this.channel,
+                text: summaryText,
+                blocks: this.buildParentBlocks(prs),
+            });
+            for (const [repo, repoPRs] of Object.entries(repoGroups)) {
+                await this.postMessage({
+                    channel: this.channel,
+                    text: `${repo}: ${repoPRs.length} PR${repoPRs.length > 1 ? "s" : ""}`,
+                    blocks: this.buildRepoReplyBlocks(repo, repoPRs),
+                    thread_ts: parentTs,
+                });
+            }
+            await this.postMessage({
+                channel: this.channel,
+                text: "Amazing work everyone! Keep shipping!",
+                blocks: this.buildFooterBlocks(),
+                thread_ts: parentTs,
+            });
+            console.log(chalk_1.default.green(`Successfully sent threaded celebration for ${chalk_1.default.bold(prs.length.toString())} PRs to Slack (bot API, ${Object.keys(repoGroups).length} repo replies)!`));
+        }
+        catch (error) {
+            console.error(chalk_1.default.red("Error sending message to Slack:"), error);
+            throw error;
+        }
+    }
+    /**
+     * POST to chat.postMessage. Returns the parent message ts on success.
+     * Throws on transport errors or `ok: false` API responses.
+     */
+    async postMessage(request) {
+        const response = await axios_1.default.post(`${SLACK_API_BASE}/chat.postMessage`, request, {
+            headers: {
+                Authorization: `Bearer ${this.botToken}`,
+                "Content-Type": "application/json; charset=utf-8",
+            },
+        });
+        const data = response.data;
+        if (!data || !data.ok) {
+            throw new Error(`Slack chat.postMessage failed: ${data?.error ?? "unknown error"}`);
+        }
+        if (!data.ts) {
+            throw new Error("Slack chat.postMessage succeeded but did not return a ts");
+        }
+        return data.ts;
+    }
     getDayHeader() {
-        const dayOfWeek = new Date().getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+        const dayOfWeek = new Date().getDay();
         const headers = {
             1: "Monday Merge Magic!",
             2: "Turbo Tuesday!",
@@ -36561,29 +36647,110 @@ class SlackNotifier {
             4: "Throwdown Thursday!",
             5: "Fantastic Friday!",
         };
-        // Default for weekends or if not Mon-Fri
         return headers[dayOfWeek] || "Time to Celebrate!";
+    }
+    pickRandomEmoji() {
+        const emojis = ["🎉", "🚀", "✨", "🎊", "🎈", "🌟", "💫", "🔥"];
+        return emojis[Math.floor(Math.random() * emojis.length)];
+    }
+    buildSummaryText(prs) {
+        const uniqueAuthors = new Set(prs.map((pr) => pr.author));
+        return `*${prs.length}* awesome PR${prs.length > 1 ? "s" : ""} merged in the last ${this.mergeWindowHours} hour${this.mergeWindowHours !== 1 ? "s" : ""} by *${uniqueAuthors.size}* contributor${uniqueAuthors.size > 1 ? "s" : ""}!`;
+    }
+    /**
+     * Plain-text fallback used as the `text` field on chat.postMessage parent —
+     * shown in notifications and accessible contexts.
+     */
+    buildSummaryFallbackText(prs) {
+        const uniqueAuthors = new Set(prs.map((pr) => pr.author));
+        return `${this.getDayHeader()} ${prs.length} PR${prs.length > 1 ? "s" : ""} merged by ${uniqueAuthors.size} contributor${uniqueAuthors.size > 1 ? "s" : ""}`;
+    }
+    /**
+     * Parent message blocks — header + summary stats + a hint pointing to the thread.
+     */
+    buildParentBlocks(prs) {
+        const randomEmoji = this.pickRandomEmoji();
+        const headerText = this.getDayHeader();
+        return [
+            {
+                type: "header",
+                text: {
+                    type: "plain_text",
+                    text: `${randomEmoji} ${headerText} ${randomEmoji}`,
+                    emoji: true,
+                },
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: this.buildSummaryText(prs),
+                },
+            },
+            {
+                type: "context",
+                elements: [
+                    {
+                        type: "mrkdwn",
+                        text: "🧵 PR details in thread below",
+                    },
+                ],
+            },
+        ];
+    }
+    /**
+     * One repo group's worth of blocks — used as a threaded reply.
+     */
+    buildRepoReplyBlocks(repo, repoPRs) {
+        const blocks = [
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: `*📦 ${repo}*`,
+                },
+            },
+        ];
+        repoPRs.forEach((pr) => {
+            blocks.push({
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: `• 🔀 <${pr.url}|#${pr.number}: ${pr.title}>\n  _👤 @${pr.author}_`,
+                },
+            });
+        });
+        return blocks;
+    }
+    buildFooterBlocks() {
+        return [
+            {
+                type: "context",
+                elements: [
+                    {
+                        type: "mrkdwn",
+                        text: "🙌 Amazing work everyone! Keep shipping! 🙌",
+                    },
+                ],
+            },
+        ];
     }
     /**
      * Build a simple text message for Slack Workflow Webhooks
-     * Workflow webhooks only support plain text in the format: {"message": "text"}
      */
     buildSimpleTextMessage(prs) {
         const uniqueAuthors = new Set(prs.map((pr) => pr.author));
         const repoGroups = this.groupPRsByRepo(prs);
-        const celebrationEmojis = ["🎉", "🚀", "✨", "🎊", "🎈", "🌟", "💫", "🔥"];
-        const randomEmoji = celebrationEmojis[Math.floor(Math.random() * celebrationEmojis.length)];
+        const randomEmoji = this.pickRandomEmoji();
         const headerText = this.getDayHeader();
-        // Build the text message with nice formatting
         let message = `${randomEmoji} ${headerText} ${randomEmoji}\n\n`;
         message += `*${prs.length}* awesome PR${prs.length > 1 ? "s" : ""} merged in the last ${this.mergeWindowHours} hour${this.mergeWindowHours !== 1 ? "s" : ""} by *${uniqueAuthors.size}* contributor${uniqueAuthors.size > 1 ? "s" : ""}!\n\n`;
         message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
-        // Add PRs grouped by repository
         Object.entries(repoGroups).forEach(([repo, repoPRs]) => {
             message += `📦 ${repo}\n\n`;
             repoPRs.forEach((pr) => {
-                message += `  • ${pr.title}\n`;
-                message += `        - @${pr.author}\n`;
+                message += `  • 🔀 #${pr.number}: ${pr.title}\n`;
+                message += `        - 👤 @${pr.author}\n`;
                 message += `        - ${pr.url}\n\n`;
             });
         });
@@ -36593,15 +36760,11 @@ class SlackNotifier {
     }
     /**
      * Build a rich Block Kit message for Slack Incoming Webhooks
-     * Incoming webhooks support full Block Kit formatting
      */
     buildCelebrationMessage(prs) {
-        const uniqueAuthors = new Set(prs.map((pr) => pr.author));
-        const repoGroups = this.groupPRsByRepo(prs);
-        const celebrationEmojis = ["🎉", "🚀", "✨", "🎊", "🎈", "🌟", "💫", "🔥"];
-        const randomEmoji = celebrationEmojis[Math.floor(Math.random() * celebrationEmojis.length)];
+        const randomEmoji = this.pickRandomEmoji();
         const headerText = this.getDayHeader();
-        // Build the message blocks
+        const repoGroups = this.groupPRsByRepo(prs);
         const blocks = [
             {
                 type: "header",
@@ -36615,14 +36778,13 @@ class SlackNotifier {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `*${prs.length}* awesome PR${prs.length > 1 ? "s" : ""} merged in the last ${this.mergeWindowHours} hour${this.mergeWindowHours !== 1 ? "s" : ""} by *${uniqueAuthors.size}* contributor${uniqueAuthors.size > 1 ? "s" : ""}!`,
+                    text: this.buildSummaryText(prs),
                 },
             },
             {
                 type: "divider",
             },
         ];
-        // Add PRs grouped by repository
         Object.entries(repoGroups).forEach(([repo, repoPRs]) => {
             blocks.push({
                 type: "section",
@@ -36641,7 +36803,6 @@ class SlackNotifier {
                 });
             });
         });
-        // Fun footer
         blocks.push({
             type: "divider",
         }, {
@@ -36676,13 +36837,20 @@ exports.SlackNotifier = SlackNotifier;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.WebhookType = void 0;
+exports.DeliveryMode = exports.WebhookType = void 0;
 // Webhook type enum
 var WebhookType;
 (function (WebhookType) {
     WebhookType["INCOMING"] = "incoming";
     WebhookType["WORKFLOW"] = "workflow";
 })(WebhookType || (exports.WebhookType = WebhookType = {}));
+// Delivery mode — controls whether we send a single message via webhook
+// or post a parent + threaded replies via the Slack Web API
+var DeliveryMode;
+(function (DeliveryMode) {
+    DeliveryMode["WEBHOOK"] = "webhook";
+    DeliveryMode["BOT_API"] = "bot_api";
+})(DeliveryMode || (exports.DeliveryMode = DeliveryMode = {}));
 
 
 /***/ }),
