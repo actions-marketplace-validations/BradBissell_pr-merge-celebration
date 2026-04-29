@@ -711,14 +711,18 @@ describe('SlackNotifier', () => {
       );
       expect(replyBRepoBlock.text.text).toContain('o/repo-b');
 
-      // repo-a reply should contain both PRs from that repo
-      expect(
-        replyA.blocks.filter(
-          (b: any) =>
-            b.type === 'section' &&
-            (b.text?.text?.includes('#11') || b.text?.text?.includes('#12'))
-        ).length
-      ).toBe(2);
+      // repo-a reply uses a single section block whose text contains both
+      // PRs from that repo (one block per repo, blank line between PRs).
+      const repoASections = replyA.blocks.filter(
+        (b: any) =>
+          b.type === 'section' &&
+          (b.text?.text?.includes('#11') || b.text?.text?.includes('#12'))
+      );
+      expect(repoASections.length).toBe(1);
+      expect(repoASections[0].text.text).toContain('#11');
+      expect(repoASections[0].text.text).toContain('#12');
+      expect(repoASections[0].text.text).toContain('@alice');
+      expect(repoASections[0].text.text).toContain('@bob');
 
       // footer should contain encouragement
       expect(JSON.stringify(footer.blocks)).toContain('Amazing work everyone');
