@@ -3,7 +3,6 @@ import chalk from "chalk";
 import { RepoConfig } from "./types";
 
 export function getConfig() {
-  // Read GitHub Actions inputs if available, otherwise fall back to env vars
   const githubToken = core.getInput("github-token") || process.env.GITHUB_TOKEN;
   const slackWebhookUrl =
     core.getInput("slack-webhook-url") || process.env.SLACK_WEBHOOK_URL;
@@ -15,13 +14,13 @@ export function getConfig() {
     core.getInput("repos-to-check") || process.env.REPOS_TO_CHECK;
   const mergeWindow =
     core.getInput("merge-window") || process.env.MERGE_WINDOW || "24";
+  const weekendCatchupRaw =
+    core.getInput("weekend-catchup") || process.env.WEEKEND_CATCHUP || "false";
 
   if (!githubToken) {
     throw new Error("GITHUB_TOKEN environment variable is required");
   }
 
-  // Either bot token + channel OR webhook URL must be configured.
-  // Bot token mode takes precedence (enables threaded replies).
   const hasBotConfig = Boolean(slackBotToken && slackChannel);
   const hasWebhookConfig = Boolean(slackWebhookUrl);
 
@@ -69,6 +68,8 @@ export function getConfig() {
     );
   }
 
+  const weekendCatchup = parseBoolean(weekendCatchupRaw);
+
   const repos = parseRepos(reposToCheck);
 
   console.log(
@@ -84,6 +85,9 @@ export function getConfig() {
       `Slack mode: ${chalk.bold(hasBotConfig ? "bot token (threaded)" : "webhook")}`
     )
   );
+  if (weekendCatchup) {
+    console.log(chalk.cyan("Weekend catchup: enabled (Mondays extend by 48h)"));
+  }
   console.log("");
 
   return {
@@ -93,7 +97,12 @@ export function getConfig() {
     slackChannel: hasBotConfig ? slackChannel : undefined,
     repos,
     mergeWindowHours,
+    weekendCatchup,
   };
+}
+
+function parseBoolean(raw: string): boolean {
+  return ["true", "1", "yes"].includes(raw.trim().toLowerCase());
 }
 
 function parseRepos(reposString: string): RepoConfig[] {

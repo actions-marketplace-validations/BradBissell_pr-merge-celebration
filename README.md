@@ -82,6 +82,7 @@ Go to your repository's Settings → Secrets and variables → Actions, then add
 
 **Optional:**
 - `MERGE_WINDOW` — number of hours to look back for merged PRs (default: 24)
+- `WEEKEND_CATCHUP` — set to `true` to extend the merge window by 48 hours on Mondays so a Monday-morning run picks up Saturday and Sunday merges. No-op on other days. (default: `false`)
 
 The `GITHUB_TOKEN` is automatically provided by GitHub Actions, but if you need to check private repos or repos outside your organization, create a Personal Access Token with `repo` scope and add it as a secret.
 
@@ -129,6 +130,7 @@ jobs:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           repos-to-check: ${{ secrets.REPOS_TO_CHECK }}
           merge-window: ${{ inputs.merge-window || '24' }}
+          weekend-catchup: 'true'  # Mondays auto-extend by 48h to cover Sat+Sun
 ```
 
 ### 5. Configure the Cron Schedule (Optional)
@@ -154,6 +156,18 @@ Simply comment out the current line and uncomment your preferred time.
 - Daily cron (24 hours) → `merge-window: '24'` (default)
 - Every 12 hours → `merge-window: '12'`
 - Every 6 hours → `merge-window: '6'`
+
+### Weekend Catchup (Monday Coverage)
+
+If you run a daily cron and want Monday's celebration to also include PRs merged Saturday and Sunday, set:
+
+```yaml
+weekend-catchup: 'true'
+```
+
+When enabled, the action checks the runner's day of the week. **Only on Mondays**, the merge window is auto-extended by 48 hours — so `merge-window: '24'` becomes a 72-hour lookback on Monday and stays at 24 hours every other day. The summary message and Slack header reflect the extended window automatically.
+
+**Timezone note**: Day-of-week is taken from the runner's clock, which is **UTC** on GitHub-hosted runners. If your cron fires near UTC midnight, the runner's "Monday" may not match your local Monday. For most schedules (e.g. 11 AM Eastern → 16:00 UTC), Monday-UTC and your local Monday line up.
 
 ### 6. Enable GitHub Actions
 

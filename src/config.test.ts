@@ -322,4 +322,52 @@ describe('getConfig', () => {
 
     expect(config.mergeWindowHours).toBe(720);
   });
+
+  describe('weekendCatchup', () => {
+    beforeEach(() => {
+      delete process.env.WEEKEND_CATCHUP;
+      process.env.GITHUB_TOKEN = 'ghp_token123';
+      process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/test';
+      process.env.REPOS_TO_CHECK = 'octocat/hello-world';
+    });
+
+    it('defaults to false when not set', () => {
+      expect(getConfig().weekendCatchup).toBe(false);
+    });
+
+    it('parses "true" as true', () => {
+      process.env.WEEKEND_CATCHUP = 'true';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('parses "1" as true', () => {
+      process.env.WEEKEND_CATCHUP = '1';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('parses "yes" as true', () => {
+      process.env.WEEKEND_CATCHUP = 'yes';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('treats arbitrary strings as false', () => {
+      process.env.WEEKEND_CATCHUP = 'maybe';
+      expect(getConfig().weekendCatchup).toBe(false);
+    });
+
+    it('parses "false" as false', () => {
+      process.env.WEEKEND_CATCHUP = 'false';
+      expect(getConfig().weekendCatchup).toBe(false);
+    });
+
+    it('is case-insensitive', () => {
+      process.env.WEEKEND_CATCHUP = 'TRUE';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('handles whitespace', () => {
+      process.env.WEEKEND_CATCHUP = '  true  ';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+  });
 });

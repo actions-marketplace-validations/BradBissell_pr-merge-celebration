@@ -36318,18 +36318,16 @@ exports.getConfig = getConfig;
 const core = __importStar(__nccwpck_require__(6966));
 const chalk_1 = __importDefault(__nccwpck_require__(1702));
 function getConfig() {
-    // Read GitHub Actions inputs if available, otherwise fall back to env vars
     const githubToken = core.getInput("github-token") || process.env.GITHUB_TOKEN;
     const slackWebhookUrl = core.getInput("slack-webhook-url") || process.env.SLACK_WEBHOOK_URL;
     const slackBotToken = core.getInput("slack-bot-token") || process.env.SLACK_BOT_TOKEN;
     const slackChannel = core.getInput("slack-channel") || process.env.SLACK_CHANNEL;
     const reposToCheck = core.getInput("repos-to-check") || process.env.REPOS_TO_CHECK;
     const mergeWindow = core.getInput("merge-window") || process.env.MERGE_WINDOW || "24";
+    const weekendCatchupRaw = core.getInput("weekend-catchup") || process.env.WEEKEND_CATCHUP || "false";
     if (!githubToken) {
         throw new Error("GITHUB_TOKEN environment variable is required");
     }
-    // Either bot token + channel OR webhook URL must be configured.
-    // Bot token mode takes precedence (enables threaded replies).
     const hasBotConfig = Boolean(slackBotToken && slackChannel);
     const hasWebhookConfig = Boolean(slackWebhookUrl);
     if (slackBotToken && !slackChannel) {
@@ -36354,10 +36352,14 @@ function getConfig() {
         mergeWindowHours > 720) {
         throw new Error("MERGE_WINDOW must be a positive number between 1 and 720 hours (30 days)");
     }
+    const weekendCatchup = parseBoolean(weekendCatchupRaw);
     const repos = parseRepos(reposToCheck);
     console.log(chalk_1.default.cyan(`Checking ${chalk_1.default.bold(repos.length.toString())} repository(ies):`));
     repos.forEach((repo) => console.log(chalk_1.default.gray(`  - ${repo.owner}/${repo.repo}`)));
     console.log(chalk_1.default.cyan(`Slack mode: ${chalk_1.default.bold(hasBotConfig ? "bot token (threaded)" : "webhook")}`));
+    if (weekendCatchup) {
+        console.log(chalk_1.default.cyan("Weekend catchup: enabled (Mondays extend by 48h)"));
+    }
     console.log("");
     return {
         githubToken,
@@ -36366,7 +36368,11 @@ function getConfig() {
         slackChannel: hasBotConfig ? slackChannel : undefined,
         repos,
         mergeWindowHours,
+        weekendCatchup,
     };
+}
+function parseBoolean(raw) {
+    return ["true", "1", "yes"].includes(raw.trim().toLowerCase());
 }
 function parseRepos(reposString) {
     const repos = reposString
@@ -36481,17 +36487,19 @@ const chalk_1 = __importDefault(__nccwpck_require__(1702));
 const github_1 = __nccwpck_require__(4171);
 const slack_1 = __nccwpck_require__(8638);
 const config_1 = __nccwpck_require__(6878);
+const window_1 = __nccwpck_require__(1492);
 async function main() {
     try {
         console.log(chalk_1.default.bold.magenta('🎉 Starting PR Merge Celebration Bot...\n'));
-        // Load configuration
         const config = (0, config_1.getConfig)();
-        // Initialize clients
+        const effectiveWindowHours = (0, window_1.computeEffectiveMergeWindow)(config.mergeWindowHours, config.weekendCatchup);
+        if (effectiveWindowHours !== config.mergeWindowHours) {
+            console.log(chalk_1.default.cyan(`📅 Monday weekend-catchup active — extending merge window from ${chalk_1.default.bold(config.mergeWindowHours.toString())}h to ${chalk_1.default.bold(effectiveWindowHours.toString())}h\n`));
+        }
         const githubClient = new github_1.GitHubClient(config.githubToken);
-        const slackNotifier = new slack_1.SlackNotifier(config.slackWebhookUrl, config.mergeWindowHours, { botToken: config.slackBotToken, channel: config.slackChannel });
-        // Fetch merged PRs from the configured time window
-        console.log(chalk_1.default.blue(`Looking back ${chalk_1.default.bold(config.mergeWindowHours.toString())} hours for merged PRs\n`));
-        const mergedPRs = await githubClient.getMergedPRsInTimeWindow(config.repos, config.mergeWindowHours);
+        const slackNotifier = new slack_1.SlackNotifier(config.slackWebhookUrl, effectiveWindowHours, { botToken: config.slackBotToken, channel: config.slackChannel });
+        console.log(chalk_1.default.blue(`Looking back ${chalk_1.default.bold(effectiveWindowHours.toString())} hours for merged PRs\n`));
+        const mergedPRs = await githubClient.getMergedPRsInTimeWindow(config.repos, effectiveWindowHours);
         console.log(chalk_1.default.yellow(`\nTotal merged PRs found: ${chalk_1.default.bold(mergedPRs.length.toString())}\n`));
         if (mergedPRs.length > 0) {
             console.log(chalk_1.default.green('Merged PRs:'));
@@ -36500,7 +36508,6 @@ async function main() {
             });
             console.log('');
         }
-        // Send celebration to Slack
         await slackNotifier.sendCelebration(mergedPRs);
         console.log(chalk_1.default.bold.green('\n✅ PR Celebration complete!'));
     }
@@ -36851,6 +36858,33 @@ var DeliveryMode;
     DeliveryMode["WEBHOOK"] = "webhook";
     DeliveryMode["BOT_API"] = "bot_api";
 })(DeliveryMode || (exports.DeliveryMode = DeliveryMode = {}));
+
+
+/***/ }),
+
+/***/ 1492:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.computeEffectiveMergeWindow = computeEffectiveMergeWindow;
+/**
+ * Compute the effective merge-window in hours.
+ *
+ * When `weekendCatchup` is enabled and `now` is a Monday, extends the window
+ * by 48 hours so a Monday-morning run picks up PRs merged Saturday and Sunday
+ * in addition to the configured base window.
+ *
+ * Day-of-week is taken from the runner's local clock, which is UTC by default
+ * on GitHub Actions runners.
+ */
+function computeEffectiveMergeWindow(baseHours, weekendCatchup, now = new Date()) {
+    if (!weekendCatchup)
+        return baseHours;
+    const isMonday = now.getDay() === 1;
+    return isMonday ? baseHours + 48 : baseHours;
+}
 
 
 /***/ }),
