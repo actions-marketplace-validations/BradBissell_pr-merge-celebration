@@ -36694,15 +36694,6 @@ class SlackNotifier {
                     text: this.buildSummaryText(prs),
                 },
             },
-            {
-                type: "context",
-                elements: [
-                    {
-                        type: "mrkdwn",
-                        text: "🧵 PR details in thread below",
-                    },
-                ],
-            },
         ];
     }
     /**
