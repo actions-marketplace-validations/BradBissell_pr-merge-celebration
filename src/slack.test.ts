@@ -129,12 +129,11 @@ describe('SlackNotifier', () => {
       const sentMessage = (axios.post as any).mock.calls[0][1];
       const blocks = sentMessage.blocks;
 
-      // Find sections with repository headers
       const repoSections = blocks.filter(
         (block: any) => block.type === 'section' && block.text?.text?.includes('📦')
       );
 
-      expect(repoSections.length).toBe(2); // Two different repositories
+      expect(repoSections.length).toBe(2);
     });
 
     it('should include correct contributor count', async () => {
@@ -160,7 +159,7 @@ describe('SlackNotifier', () => {
         {
           title: 'PR 3',
           number: 125,
-          author: 'alice', // Same author as PR 1
+          author: 'alice',
           authorAvatar: 'https://avatar.com/alice',
           url: 'https://github.com/octocat/hello-world/pull/125',
           mergedAt: '2024-01-01T14:00:00Z',
@@ -178,7 +177,7 @@ describe('SlackNotifier', () => {
       );
 
       expect(summaryBlock.text.text).toContain('*3* awesome PRs');
-      expect(summaryBlock.text.text).toContain('*2* contributors'); // alice and bob
+      expect(summaryBlock.text.text).toContain('*2* contributors');
     });
 
     it('should use singular form for single PR and contributor', async () => {
@@ -547,19 +546,15 @@ describe('SlackNotifier', () => {
 
       const sentMessage = (axios.post as any).mock.calls[0][1];
 
-      // Check header is present
       expect(sentMessage.message).toMatch(/[🎉🚀✨🎊🎈🌟💫🔥]/);
 
-      // Check summary with counts
       expect(sentMessage.message).toContain('*2* awesome PR');
       expect(sentMessage.message).toContain('48 hours');
       expect(sentMessage.message).toContain('*2* contributor');
 
-      // Check repo grouping
       expect(sentMessage.message).toContain('📦 org/repo1');
       expect(sentMessage.message).toContain('📦 org/repo2');
 
-      // Check PR details
       expect(sentMessage.message).toContain('🔀 #100: Add feature A');
       expect(sentMessage.message).toContain('https://github.com/org/repo1/pull/100');
       expect(sentMessage.message).toContain('👤 @alice');
@@ -568,8 +563,215 @@ describe('SlackNotifier', () => {
       expect(sentMessage.message).toContain('https://github.com/org/repo2/pull/200');
       expect(sentMessage.message).toContain('👤 @bob');
 
-      // Check footer
       expect(sentMessage.message).toContain('🙌 Amazing work everyone! Keep shipping! 🙌');
+    });
+  });
+
+  describe('Constructor validation', () => {
+    it('should throw when neither webhook nor bot+channel are provided', () => {
+      expect(() => new SlackNotifier(undefined, 24)).toThrow(
+        'SlackNotifier requires either a webhook URL or a bot token + channel'
+      );
+    });
+
+    it('should accept bot token + channel without a webhook URL', () => {
+      expect(
+        () =>
+          new SlackNotifier(undefined, 24, {
+            botToken: 'xoxb-test',
+            channel: 'C123',
+          })
+      ).not.toThrow();
+    });
+
+    it('should throw when bot token is provided without channel and no webhook', () => {
+      expect(
+        () =>
+          new SlackNotifier(undefined, 24, {
+            botToken: 'xoxb-test',
+          })
+      ).toThrow('SlackNotifier requires either a webhook URL or a bot token + channel');
+    });
+  });
+
+  describe('Bot API mode (threaded messages)', () => {
+    const botToken = 'xoxb-test-token';
+    const channel = 'C0123ABC456';
+
+    function makeBotNotifier(mergeWindow: number = 24) {
+      return new SlackNotifier(undefined, mergeWindow, { botToken, channel });
+    }
+
+    function mockChatPost(parentTs: string, replyTs: string = '999.000') {
+      // First call returns parent ts; subsequent calls return reply ts
+      let call = 0;
+      (axios.post as any).mockImplementation(async () => {
+        call += 1;
+        return {
+          status: 200,
+          data: {
+            ok: true,
+            ts: call === 1 ? parentTs : `${replyTs}-${call}`,
+            channel,
+          },
+        };
+      });
+    }
+
+    it('should call chat.postMessage with bot token auth header', async () => {
+      const notifier = makeBotNotifier();
+      mockChatPost('1700000000.000100');
+
+      await notifier.sendCelebration([
+        {
+          title: 'PR 1',
+          number: 1,
+          author: 'alice',
+          authorAvatar: '',
+          url: 'https://github.com/o/r/pull/1',
+          mergedAt: '2024-01-01T00:00:00Z',
+          repository: 'o/r',
+        },
+      ]);
+
+      expect(axios.post).toHaveBeenCalled();
+      const [url, _body, options] = (axios.post as any).mock.calls[0];
+      expect(url).toBe('https://slack.com/api/chat.postMessage');
+      expect(options.headers.Authorization).toBe(`Bearer ${botToken}`);
+      expect(options.headers['Content-Type']).toContain('application/json');
+    });
+
+    it('should post a parent message and one threaded reply per repo group + footer', async () => {
+      const notifier = makeBotNotifier();
+      mockChatPost('1700000000.000100');
+
+      const prs: MergedPR[] = [
+        {
+          title: 'PR a1',
+          number: 11,
+          author: 'alice',
+          authorAvatar: '',
+          url: 'https://github.com/o/repo-a/pull/11',
+          mergedAt: '2024-01-01T00:00:00Z',
+          repository: 'o/repo-a',
+        },
+        {
+          title: 'PR a2',
+          number: 12,
+          author: 'bob',
+          authorAvatar: '',
+          url: 'https://github.com/o/repo-a/pull/12',
+          mergedAt: '2024-01-01T01:00:00Z',
+          repository: 'o/repo-a',
+        },
+        {
+          title: 'PR b1',
+          number: 21,
+          author: 'carol',
+          authorAvatar: '',
+          url: 'https://github.com/o/repo-b/pull/21',
+          mergedAt: '2024-01-01T02:00:00Z',
+          repository: 'o/repo-b',
+        },
+      ];
+
+      await notifier.sendCelebration(prs);
+
+      // 1 parent + 2 repo replies + 1 footer = 4 calls
+      expect((axios.post as any).mock.calls.length).toBe(4);
+
+      const calls = (axios.post as any).mock.calls;
+      const parentBody = calls[0][1];
+      expect(parentBody.channel).toBe(channel);
+      expect(parentBody.thread_ts).toBeUndefined();
+      expect(parentBody.blocks).toBeDefined();
+      // Parent should NOT contain repo blocks
+      expect(
+        parentBody.blocks.some(
+          (b: any) => b.type === 'section' && b.text?.text?.includes('📦')
+        )
+      ).toBe(false);
+
+      // Replies 2 and 3 are repo replies; reply 4 is footer
+      const replyA = calls[1][1];
+      const replyB = calls[2][1];
+      const footer = calls[3][1];
+
+      expect(replyA.thread_ts).toBe('1700000000.000100');
+      expect(replyB.thread_ts).toBe('1700000000.000100');
+      expect(footer.thread_ts).toBe('1700000000.000100');
+
+      const replyARepoBlock = replyA.blocks.find(
+        (b: any) => b.type === 'section' && b.text?.text?.includes('📦')
+      );
+      expect(replyARepoBlock.text.text).toContain('o/repo-a');
+
+      const replyBRepoBlock = replyB.blocks.find(
+        (b: any) => b.type === 'section' && b.text?.text?.includes('📦')
+      );
+      expect(replyBRepoBlock.text.text).toContain('o/repo-b');
+
+      // repo-a reply uses a single section block whose text contains both
+      // PRs from that repo (one block per repo, blank line between PRs).
+      const repoASections = replyA.blocks.filter(
+        (b: any) =>
+          b.type === 'section' &&
+          (b.text?.text?.includes('#11') || b.text?.text?.includes('#12'))
+      );
+      expect(repoASections.length).toBe(1);
+      expect(repoASections[0].text.text).toContain('#11');
+      expect(repoASections[0].text.text).toContain('#12');
+      expect(repoASections[0].text.text).toContain('@alice');
+      expect(repoASections[0].text.text).toContain('@bob');
+
+      // footer should contain encouragement
+      expect(JSON.stringify(footer.blocks)).toContain('Amazing work everyone');
+    });
+
+    it('should throw when chat.postMessage returns ok: false', async () => {
+      const notifier = makeBotNotifier();
+      (axios.post as any).mockResolvedValue({
+        status: 200,
+        data: { ok: false, error: 'channel_not_found' },
+      });
+
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(
+        notifier.sendCelebration([
+          {
+            title: 'PR',
+            number: 1,
+            author: 'alice',
+            authorAvatar: '',
+            url: 'https://github.com/o/r/pull/1',
+            mergedAt: '2024-01-01T00:00:00Z',
+            repository: 'o/r',
+          },
+        ])
+      ).rejects.toThrow('channel_not_found');
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('should prefer bot API when both webhook and bot config are provided', async () => {
+      const notifier = new SlackNotifier(mockWebhookUrl, 24, { botToken, channel });
+      mockChatPost('1700000000.000200');
+
+      await notifier.sendCelebration([
+        {
+          title: 'PR',
+          number: 1,
+          author: 'alice',
+          authorAvatar: '',
+          url: 'https://github.com/o/r/pull/1',
+          mergedAt: '2024-01-01T00:00:00Z',
+          repository: 'o/r',
+        },
+      ]);
+
+      const firstCall = (axios.post as any).mock.calls[0];
+      expect(firstCall[0]).toBe('https://slack.com/api/chat.postMessage');
     });
   });
 });

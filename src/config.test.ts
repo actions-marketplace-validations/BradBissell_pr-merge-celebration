@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { getConfig } from './config';
 
 describe('getConfig', () => {
   beforeEach(() => {
-    // Clear all environment variables before each test
     delete process.env.GITHUB_TOKEN;
     delete process.env.SLACK_WEBHOOK_URL;
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.SLACK_CHANNEL;
     delete process.env.REPOS_TO_CHECK;
     delete process.env.MERGE_WINDOW;
   });
@@ -17,11 +18,13 @@ describe('getConfig', () => {
     expect(() => getConfig()).toThrow('GITHUB_TOKEN environment variable is required');
   });
 
-  it('should throw error when SLACK_WEBHOOK_URL is missing', () => {
+  it('should throw error when neither webhook URL nor bot token+channel are set', () => {
     process.env.GITHUB_TOKEN = 'ghp_token123';
     process.env.REPOS_TO_CHECK = 'owner/repo';
 
-    expect(() => getConfig()).toThrow('SLACK_WEBHOOK_URL environment variable is required');
+    expect(() => getConfig()).toThrow(
+      'Either SLACK_BOT_TOKEN + SLACK_CHANNEL (for threaded messages) or SLACK_WEBHOOK_URL is required'
+    );
   });
 
   it('should throw error when SLACK_WEBHOOK_URL is invalid format', () => {
@@ -97,12 +100,14 @@ describe('getConfig', () => {
       expect(config.slackWebhookUrl).toBe('https://hooks.slack.com/test');
     });
 
-    it('should reject empty string as webhook URL', () => {
+    it('should reject empty string as webhook URL when no bot token configured', () => {
       process.env.GITHUB_TOKEN = 'ghp_token123';
       process.env.SLACK_WEBHOOK_URL = '';
       process.env.REPOS_TO_CHECK = 'owner/repo';
 
-      expect(() => getConfig()).toThrow('SLACK_WEBHOOK_URL environment variable is required');
+      expect(() => getConfig()).toThrow(
+        'Either SLACK_BOT_TOKEN + SLACK_CHANNEL (for threaded messages) or SLACK_WEBHOOK_URL is required'
+      );
     });
 
     it('should reject URL with typo in domain', () => {
@@ -111,6 +116,56 @@ describe('getConfig', () => {
       process.env.REPOS_TO_CHECK = 'owner/repo';
 
       expect(() => getConfig()).toThrow('SLACK_WEBHOOK_URL must be a valid Slack webhook URL (should start with https://hooks.slack.com/)');
+    });
+  });
+
+  describe('Slack bot token mode', () => {
+    it('should accept bot token + channel without webhook URL', () => {
+      process.env.GITHUB_TOKEN = 'ghp_token123';
+      process.env.SLACK_BOT_TOKEN = 'xoxb-test-token';
+      process.env.SLACK_CHANNEL = 'C0123ABC456';
+      process.env.REPOS_TO_CHECK = 'owner/repo';
+
+      const config = getConfig();
+
+      expect(config.slackBotToken).toBe('xoxb-test-token');
+      expect(config.slackChannel).toBe('C0123ABC456');
+      expect(config.slackWebhookUrl).toBeUndefined();
+    });
+
+    it('should reject bot token without xoxb- prefix', () => {
+      process.env.GITHUB_TOKEN = 'ghp_token123';
+      process.env.SLACK_BOT_TOKEN = 'xoxp-user-token';
+      process.env.SLACK_CHANNEL = 'C0123ABC456';
+      process.env.REPOS_TO_CHECK = 'owner/repo';
+
+      expect(() => getConfig()).toThrow(
+        'SLACK_BOT_TOKEN must be a valid Slack bot token (should start with xoxb-)'
+      );
+    });
+
+    it('should reject bot token without channel', () => {
+      process.env.GITHUB_TOKEN = 'ghp_token123';
+      process.env.SLACK_BOT_TOKEN = 'xoxb-test-token';
+      process.env.REPOS_TO_CHECK = 'owner/repo';
+
+      expect(() => getConfig()).toThrow(
+        'SLACK_CHANNEL is required when SLACK_BOT_TOKEN is set'
+      );
+    });
+
+    it('should prefer bot config over webhook when both are present', () => {
+      process.env.GITHUB_TOKEN = 'ghp_token123';
+      process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/services/T/B/X';
+      process.env.SLACK_BOT_TOKEN = 'xoxb-test-token';
+      process.env.SLACK_CHANNEL = 'C0123ABC456';
+      process.env.REPOS_TO_CHECK = 'owner/repo';
+
+      const config = getConfig();
+
+      expect(config.slackBotToken).toBe('xoxb-test-token');
+      expect(config.slackChannel).toBe('C0123ABC456');
+      expect(config.slackWebhookUrl).toBeUndefined();
     });
   });
 
@@ -133,7 +188,7 @@ describe('getConfig', () => {
     expect(config.githubToken).toBe('ghp_token123');
     expect(config.slackWebhookUrl).toBe('https://hooks.slack.com/test');
     expect(config.repos).toEqual([{ owner: 'octocat', repo: 'hello-world' }]);
-    expect(config.mergeWindowHours).toBe(24); // Default value
+    expect(config.mergeWindowHours).toBe(24);
   });
 
   it('should parse multiple repositories correctly', () => {
@@ -266,5 +321,53 @@ describe('getConfig', () => {
     const config = getConfig();
 
     expect(config.mergeWindowHours).toBe(720);
+  });
+
+  describe('weekendCatchup', () => {
+    beforeEach(() => {
+      delete process.env.WEEKEND_CATCHUP;
+      process.env.GITHUB_TOKEN = 'ghp_token123';
+      process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/test';
+      process.env.REPOS_TO_CHECK = 'octocat/hello-world';
+    });
+
+    it('defaults to false when not set', () => {
+      expect(getConfig().weekendCatchup).toBe(false);
+    });
+
+    it('parses "true" as true', () => {
+      process.env.WEEKEND_CATCHUP = 'true';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('parses "1" as true', () => {
+      process.env.WEEKEND_CATCHUP = '1';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('parses "yes" as true', () => {
+      process.env.WEEKEND_CATCHUP = 'yes';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('treats arbitrary strings as false', () => {
+      process.env.WEEKEND_CATCHUP = 'maybe';
+      expect(getConfig().weekendCatchup).toBe(false);
+    });
+
+    it('parses "false" as false', () => {
+      process.env.WEEKEND_CATCHUP = 'false';
+      expect(getConfig().weekendCatchup).toBe(false);
+    });
+
+    it('is case-insensitive', () => {
+      process.env.WEEKEND_CATCHUP = 'TRUE';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
+
+    it('handles whitespace', () => {
+      process.env.WEEKEND_CATCHUP = '  true  ';
+      expect(getConfig().weekendCatchup).toBe(true);
+    });
   });
 });

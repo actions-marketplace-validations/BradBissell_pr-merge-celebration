@@ -11,8 +11,14 @@ inputs:
     required: true
     default: ${{ github.token }}
   slack-webhook-url:
-    description: 'Slack webhook URL for posting messages'
-    required: true
+    description: 'Slack incoming or workflow webhook URL. Used when slack-bot-token is not provided. Webhooks cannot post threaded replies.'
+    required: false
+  slack-bot-token:
+    description: 'Slack bot token (xoxb-...). Enables threaded replies via chat.postMessage. Takes precedence over slack-webhook-url when set. Requires slack-channel.'
+    required: false
+  slack-channel:
+    description: 'Slack channel ID (e.g. C0123ABC456) or name (e.g. #pr-celebrations). Required when using slack-bot-token. Bot must be invited to the channel.'
+    required: false
   repos-to-check:
     description: 'Comma-separated list of repositories to check (format: owner/repo,owner/repo)'
     required: true
@@ -20,6 +26,10 @@ inputs:
     description: 'Number of hours to look back for merged PRs'
     required: false
     default: '24'
+  weekend-catchup:
+    description: 'When true, automatically extends the merge window by 48 hours on Mondays so a Monday-morning run includes Saturday and Sunday merges. No-op on other days. Day-of-week is taken from the runner clock (UTC by default on GitHub-hosted runners).'
+    required: false
+    default: 'false'
 
 runs:
   using: 'node20'

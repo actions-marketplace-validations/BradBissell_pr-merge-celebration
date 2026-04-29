@@ -2,21 +2,38 @@ import chalk from 'chalk';
 import { GitHubClient } from './github';
 import { SlackNotifier } from './slack';
 import { getConfig } from './config';
+import { computeEffectiveMergeWindow } from './window';
 
 async function main() {
   try {
     console.log(chalk.bold.magenta('🎉 Starting PR Merge Celebration Bot...\n'));
 
-    // Load configuration
     const config = getConfig();
 
-    // Initialize clients
-    const githubClient = new GitHubClient(config.githubToken);
-    const slackNotifier = new SlackNotifier(config.slackWebhookUrl, config.mergeWindowHours);
+    const effectiveWindowHours = computeEffectiveMergeWindow(
+      config.mergeWindowHours,
+      config.weekendCatchup
+    );
 
-    // Fetch merged PRs from the configured time window
-    console.log(chalk.blue(`Looking back ${chalk.bold(config.mergeWindowHours.toString())} hours for merged PRs\n`));
-    const mergedPRs = await githubClient.getMergedPRsInTimeWindow(config.repos, config.mergeWindowHours);
+    if (effectiveWindowHours !== config.mergeWindowHours) {
+      console.log(
+        chalk.cyan(
+          `📅 Monday weekend-catchup active — extending merge window from ${chalk.bold(
+            config.mergeWindowHours.toString()
+          )}h to ${chalk.bold(effectiveWindowHours.toString())}h\n`
+        )
+      );
+    }
+
+    const githubClient = new GitHubClient(config.githubToken);
+    const slackNotifier = new SlackNotifier(
+      config.slackWebhookUrl,
+      effectiveWindowHours,
+      { botToken: config.slackBotToken, channel: config.slackChannel }
+    );
+
+    console.log(chalk.blue(`Looking back ${chalk.bold(effectiveWindowHours.toString())} hours for merged PRs\n`));
+    const mergedPRs = await githubClient.getMergedPRsInTimeWindow(config.repos, effectiveWindowHours);
 
     console.log(chalk.yellow(`\nTotal merged PRs found: ${chalk.bold(mergedPRs.length.toString())}\n`));
 
@@ -28,7 +45,6 @@ async function main() {
       console.log('');
     }
 
-    // Send celebration to Slack
     await slackNotifier.sendCelebration(mergedPRs);
 
     console.log(chalk.bold.green('\n✅ PR Celebration complete!'));
