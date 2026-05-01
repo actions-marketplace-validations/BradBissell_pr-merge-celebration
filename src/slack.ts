@@ -251,22 +251,18 @@ export class SlackNotifier {
   /**
    * One repo group's worth of blocks — used as a threaded reply.
    *
-   * Renders all PRs in a single section block with explicit blank lines
-   * between entries. This gives reliable visual spacing in both the rendered
-   * channel view and in plain-text contexts (mobile notifications, copy-paste,
-   * screen readers) where consecutive section blocks would otherwise collapse.
+   * Renders all PRs in a single section block as a bulleted list under the
+   * repo header. One block per repo keeps the entries grouped reliably across
+   * the rendered channel view and plain-text contexts (mobile notifications,
+   * copy-paste, screen readers).
    */
   private buildRepoReplyBlocks(repo: string, repoPRs: MergedPR[]): SlackBlock[] {
     const lines: string[] = [`*📦 ${repo}*`, ""];
 
-    repoPRs.forEach((pr, index) => {
+    repoPRs.forEach((pr) => {
       lines.push(
-        `🔀 <${pr.url}|#${pr.number}: ${pr.title}>`,
-        `   👤 @${pr.author}`
+        `• <${pr.url}|#${pr.number}: ${pr.title}> — @${pr.author}`
       );
-      if (index < repoPRs.length - 1) {
-        lines.push("");
-      }
     });
 
     return [
